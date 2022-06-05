@@ -1,0 +1,154 @@
+---
+title: "FinalProject"
+author: "Shawn Leavor"
+date: "5/4/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#libraries
+library(tidyverse)
+library(ggplot2)
+library(xgboost)
+library(readr)
+library(stringr)
+library(caret)
+library(rsample)
+library(kableExtra)
+library(glmnet)
+
+```
+
+# Final Project
+## By Shawn Leavor
+## Machine Learning to Predict the Outcome of Fetus Health
+
+
+### Describe:
+
+This study is interested in being able to predict the health of a fetus based on various features. Using data from Kaggle on different measures of a fetuses health, from size to heart rate, we can predict on a scale of 1 to 3, with 1 being normal and 3 being critical, how healthy a fetus is. Using this algorithm, if accurate, can help predict when intervention is necessary and potentially save lives. 
+
+
+### Explore:
+
+```{r data}
+#Data
+df = read.csv("D:\\Documents\\UT-Austin\\AI & Public Policy\\Final Project\\Fetal_health\\fetal_health.csv")
+
+hist(df$fetal_health)
+```
+Above is a distribution of fetal health, we see that most fetuses are normal and very few are in critical condition. 
+
+```{r}
+df %>% group_by(fetal_health) %>% summarize(Heartbeats = mean(baseline.value),
+                                            Accel = mean(accelerations),
+                                            Per_Abnormal = mean(percentage_of_time_with_abnormal_long_term_variability),
+                                            histo_width = mean(histogram_width),
+                                            histo_peaks = mean(histogram_number_of_peaks)) %>%
+  round(2) %>% kbl()
+```
+From the table above, we see that a higher percent of time with long term abnormality is correlated with worse fetal health. However, we don't see any other relationships in the averages of our variables. 
+
+Below, we make new variables that look at the difference between the base and the median heartbeats for a fetus and see if there's a significant relationship.
+```{r data-manipulation}
+#Create new vars
+df = df %>% mutate( mean_sub_base = baseline.value - histogram_mean,
+                    med_sub_base = baseline.value - histogram_median,
+                    hist_t = histogram_mean / ifelse(histogram_variance != 0, histogram_variance, 1)
+  )
+
+df %>% group_by(fetal_health) %>% summarize(mean(mean_sub_base),
+                                            mean(med_sub_base),
+                                            mean(hist_t))
+```
+Here, we see a more interesting relationship. If the mean heartbeat is higher than the average heartbeat, then we see worse fetal health.
+
+## Model
+
+### XGBoost
+
+```{r Data-Split}
+#Train/test split
+x = initial_split(df, prop=0.8)
+train = training(x)
+test = testing(x)
+
+#Get col names
+list_names <- colnames(df)[colnames(df) != "fetal_health"]
+
+#make x/y train
+x_train = train[,list_names]
+y_train = train[,'fetal_health']
+
+x_test = test[,list_names]
+y_test = test[,'fetal_health']
+```
+
+```{r XGBoost}
+xgb_train = xgb.DMatrix(data = data.matrix(x_train), label = y_train)
+xgb_test = xgb.DMatrix(data = data.matrix(x_test), label = y_test)
+
+watchlist = list(train=xgb_train, test=xgb_test)
+
+#Model training
+model = xgb.train(data = xgb_train, max.depth = 5, watchlist=watchlist, nrounds = 70)
+#Final model based off test-rmse
+final = xgboost(data = xgb_train, max.depth = 5, nrounds = 28, verbose = 0)
+
+# predict values in test set
+y_pred <- predict(final, data.matrix(x_test))
+
+#Notes: Use classifier instead of regressor?
+#Classify
+y_pred[(y_pred>3)] = 3
+y_pred[(y_pred<1)] = 1
+y_pred = round(y_pred)
+y_error = y_test - y_pred
+
+absolute_error = sum(abs(y_error))
+
+#Make confusion matrix (fails)
+conf_mat = confusionMatrix(as.factor(y_pred), as.factor(y_test))
+print(conf_mat)
+```
+```{r}
+importance_matrix = xgb.importance(colnames(xgb_train), model = final)
+xgb.plot.importance(importance_matrix[1:15,])
+```
+
+Above, we see which factors are most important to the XGBoost model. The med_sub_base and mean_sub_base variables that we created seem to be strongly correlated with the predictions. 
+
+### Elastic
+
+```{r}
+lambda_grid <- 10^seq(2, -4, by = -.1)
+X_train = makeX(x_train)
+
+elastic <- glmnet(X_train, y_train, alpha = 0.5, lambda = lambda_grid)
+cv_elastic <- cv.glmnet(X_train, y_train, alpha = 0.5, lambda = lambda_grid)
+plot(cv_elastic)
+```
+```{r}
+elastic_star <- cv_elastic$lambda.min
+X_test = makeX(x_test)
+elastic_hat_star <- predict(elastic, s = elastic_star, X_test)
+mean (( elastic_hat_star - y_test)^2)
+```
+
+This RMSE seems low enough. Let's compare in a confusion matrix. 
+
+```{r}
+elastic_hat_star[(elastic_hat_star>3)] = 3
+elastic_hat_star[(elastic_hat_star<1)] = 1
+elastic_hat_star = round(elastic_hat_star)
+conf_mat = confusionMatrix(as.factor(elastic_hat_star), as.factor(y_test))
+print(conf_mat)
+```
+Our confusion matrix shows that XGBoost is a more accurate model for this classification problem. 
+
+## Outcome
+
+Overall, the XGBoost model that we implemented had great accuracy when it came to labeling the data, while the elastic model was less accurate. Overall, we find that the XGBoost model can be reliable for predicting this. This could improve health policy and allow healthcare workers to more effectively target fetuses that have poor outcomes. This can save the healthcare system money each year.
+
+There could be some issues with labeling in our data. The data is labeled by doctors as 1, 2, and 3 with a 1 meaning normal, 2 meaning suspect, and 3 meaning pathological. Any of this data could have issues, but also the category of suspect can be problematic, because something that may not be an issue can get tagged as one. 
